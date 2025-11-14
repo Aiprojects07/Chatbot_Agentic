@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+
+# OS
+.DS_Store
+
+# Env & secrets
+.env
+secrets.toml
+.streamlit/
+!.streamlit/config.toml
+# Keep .streamlit/secrets.toml out of git
+.streamlit/secrets.toml
+
+# Streamlit cache
+.streamlit/cache/
+.streamlit/state/
+
+# Logs & history
+conversation_history.jsonl
+logs/
+
+# IDE
+.vscode/
+.idea/

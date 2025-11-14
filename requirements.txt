@@ -1,0 +1,7 @@
+streamlit>=1.32,<2
+anthropic>=0.31.0
+pinecone>=4.0.0
+openai>=1.40.0
+python-dotenv>=1.0.1
+requests>=2.31.0
+toml>=0.10.2
