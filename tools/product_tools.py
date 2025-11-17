@@ -81,7 +81,7 @@ def embed_text(text: str) -> List[float]:
         "type": "object",
         "properties": {
             "name": {"type": "string", "description": "Exact product name to search for"},
-            "top_k": {"type": "integer", "minimum": 10, "description": "Number of candidates to return"}
+            "top_k": {"type": "integer", "minimum": 8, "description": "Number of candidates to return"}
         },
         "required": ["name", "top_k"],
         "additionalProperties": False
@@ -160,7 +160,7 @@ def resolve_product(name: str, top_k: int, category: str = None) -> str:
             },
             "top_k": {
                 "type": "integer",
-                "minimum": 5,
+                "minimum": 10,
                 "description": "Number of similar products to return"
             }
         },
@@ -258,7 +258,7 @@ def retrieve_similar_products(
             },
             "top_k": {
                 "type": "integer", 
-                "minimum": 10, 
+                "minimum": 5, 
                 "description": "Number of complementary products to return"
             }
         },
@@ -268,7 +268,7 @@ def retrieve_similar_products(
 )
 def retrieve_use_with_products(query: str,
                              category: str = None,
-                             top_k: int = 10) -> str:
+                             top_k: int = 5) -> str:
     try:
         # Generate embedding for the search query
         vec = embed_text(query)

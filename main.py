@@ -36,7 +36,7 @@ tools = [
         - Preparing to find complementary products (then call retrieve_use_with_products)
         
         How to use:
-        - Pass the exact product name (as written by the user if possible). Optionally pass category to narrow the search. Use top_k >= 10.
+        - Pass the exact product name (as written by the user if possible). Optionally pass category to narrow the search. Use top_k >= 8.
         - After resolving, synthesize the final answer using the retrieved context (you may then call another tool if needed).""",
         "input_schema": {
             "type": "object",
@@ -52,7 +52,7 @@ tools = [
                 },
                 "top_k": {
                     "type": "integer",
-                    "minimum": 10,
+                    "minimum": 8,
                     "description": "Number of candidates to return"
                 }
             },
@@ -99,7 +99,7 @@ tools = [
       How to use:
       1. Create a descriptive query about the type of complementary products to find
       2. Specify the target category (lipstick, lip_balm_treatment, or lip_liner)
-      3. Set top_k to control the number of results (minimum 10)
+      3. Set top_k to control the number of results (minimum 5)
       
       Example usage:
       - 'Find hydrating lip balms that work well with matte lipsticks' with category 'lip_balm_treatment'
@@ -109,7 +109,7 @@ tools = [
         "properties": {
           "query": {"type": "string", "description": "Description of complementary products to find"},
           "category": {"type": "string", "enum": ["lipstick", "lip_balm_treatment", "lip_liner"], "description": "Category to search within"},
-          "top_k": {"type": "integer", "minimum": 10, "description": "Number of complementary products to return"}
+          "top_k": {"type": "integer", "minimum": 5, "description": "Number of complementary products to return"}
         },
         "required": ["query", "category", "top_k"],
         "additionalProperties": False
@@ -127,7 +127,7 @@ def run_chat(user_message: str, history_path: Path = None) -> None:
     # Load prompt template and generation settings
     prompt_path = Path(__file__).parent / "prompt1.txt"
     system_text = None
-    temperature = 0.7
+    temperature = 0.4
     max_tokens = 2000
     # History path
     history_path = history_path or (Path(__file__).parent / "conversation_history.jsonl")
@@ -137,6 +137,52 @@ def run_chat(user_message: str, history_path: Path = None) -> None:
         except Exception:
             # Fall back to defaults on file read error
             system_text = None
+
+    # Augment system prompt with query reformulation assistant rules so the model answers directly
+    # or generates an optimized search query, instead of deflecting with prior-answer references.
+    additional_system_text = (
+        """
+        You are a query reformulation assistant for a product Q&A system.
+
+Your task: Check if the conversation history has enough information to answer the user's question. If yes, answer directly. If no, generate an optimized search query. Ask for clarification ONLY when the product being referred to is ambiguous.
+
+Strong directives:
+- Never respond with meta-commentary like "I already answered this" or "as I said before".
+- Do not use emojis.
+- Do not ask follow-up questions unless product identity is ambiguous (see Clarify rules). Never ask the user to pick categories or preferences before answering.
+- If the conversation history contains enough information to answer, ALWAYS restate the full, correct answer again for the user (prefix with "ANSWER: ") rather than referring back.
+
+Rules:
+1. First check: Does the conversation history contain enough information to answer this question?
+   - If YES: Return the answer directly based on the history (prefix with "ANSWER: ")
+   - If NO: Continue to step 2
+
+2. Ambiguity check (ONLY for product identity):
+   - If the user refers to "this lipstick", "this product", "it", "this", etc. WITHOUT naming a specific product:
+     * Check conversation history for [Retrieved: ...] markers with product context
+     * If NO clear product context exists in recent history: Return "CLARIFY: Could you please specify which lipstick you're asking about? (Include the brand and product name)"
+     * If product context exists but you're uncertain which product they mean: Return "CLARIFY: I see multiple products mentioned. Which one are you asking about - [list products]?"
+   - Do NOT ask clarification questions about preferences (finish, brand, ingredients, sensitivities) or skin tone. Proceed without them.
+
+3. For search query generation (default path when not answering directly):
+   - Always include BOTH the product identifier AND the key question terms when the question targets a specific product.
+     • Example: "What is the shade of MAC Ruby Woo?" → "MAC Ruby Woo shade" (NOT just "MAC Ruby Woo")
+     • Example: "Does it last long?" → "[Product Name] longevity lasting" (NOT just "[Product Name]")
+   - For general recommendations (e.g., "best lipstick for office"), do NOT ask to clarify preferences; generate a search query that reflects the request as-is.
+   - Look for [Retrieved: ...] markers in history — they may contain Product, Brand, and SKU from previous queries.
+   - If the question is a follow-up, include the product name AND the attribute (price, longevity, etc.).
+   - If the user mentions a NEW product name, use ONLY that new product (ignore previous context).
+   - Keep the query concise but include: product identifier + key question terms when relevant.
+   - Preserve numeric constraints and counts (e.g., "top 10", "10 options") present in the user's question.
+
+Formatting requirements:
+- Output must be PLAIN TEXT only.
+- Do NOT include XML/HTML/JSON/YAML tags, code fences, or quotes around the search query.
+- If providing a search query, return ONLY the query string."""
+
+    )
+
+    system_text = ((system_text or "").strip() + "\n\n" + additional_system_text).strip()
 
     # Load prior history and add current user message
     messages = load_conv_history(str(history_path), get_history_max_turns())
