@@ -17,11 +17,7 @@ from tools.product_tools import (
     retrieve_use_with_products,
     resolve_product,
 )
-from history_logic import (
-    get_history_max_turns,
-    load_conv_history,
-    append_conv_history,
-)
+# history_logic is not needed in router-only mode
 
 client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
@@ -52,7 +48,7 @@ tools = [
                 },
                 "top_k": {
                     "type": "integer",
-                    "minimum": 8,
+                    "minimum": 10,
                     "description": "Number of candidates to return"
                 }
             },
@@ -62,56 +58,46 @@ tools = [
     },
     {
         "name": "retrieve_similar_products",
-        "description": """Use this tool to find products that are similar to a given product description.
+        "description": """Router guidance only: Call this tool when the user asks for products similar to another product within the lip domain (e.g., alternatives, lookalikes, or variations).
         
-        When to use this tool:
-        - When the user asks for products similar to a specific item (e.g., 'find me products like this lipstick')
-        - When you need to recommend alternatives to a specific product
-        - When you want to show variations of a particular product
-      
-      How to use:
-      1. Provide a detailed product description including key features, color, and type
-      2. Set top_k to control the number of similar products to return (minimum 10)
-      
-      Example usage:
-      - 'Find 5 lipsticks similar to a long-lasting matte red lipstick'
-      - 'Show me 3 lip balms like a medicated, unscented lip treatment'""",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "product_description": {"type": "string", "description": "Detailed description of the reference product including key features"},
-          "category": {"type": "string", "enum": ["lipstick", "lip_balm_treatment", "lip_liner"], "description": "Optional category to filter by (lipstick, lip_balm_treatment, or lip_liner)"},
-          "top_k": {"type": "integer", "minimum": 10, "description": "Number of similar products to return"}
-        },
-        "required": ["product_description", "top_k"],
-        "additionalProperties": False
-      }
+        When to call:
+        - User requests similar/alternative items to a described or known product
+        - User wants variations of a particular product
+        
+        Do NOT generate or transform the query here; downstream functions will handle query refinement. Provide only the inputs specified by the schema.""",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "product_name": {"type": "string", "description": "Complete product name to anchor similarity (e.g., brand + line + shade)"},
+            "category": {"type": "string", "enum": ["lipstick", "lip_balm_treatment", "lip_liner"], "description": "Optional category to filter by (lipstick, lip_balm_treatment, or lip_liner)"},
+            "top_k": {"type": "integer", "minimum": 10, "description": "Number of similar products to return"},
+            "selected_sku": {"type": "string", "description": "Optional SKU resolved from a prior step (e.g., resolve_product)"},
+            "selected_products": {"type": "array", "description": "Optional prior resolved products array from resolve_product to improve similarity selection"}
+          },
+          "required": ["product_name", "top_k"],
+          "additionalProperties": False
+        }
     },
     {
       "name": "retrieve_use_with_products",
-      "description": """Use this tool to find complementary products based on a description.
+      "description": """Router guidance only: Call this tool when the user asks for complementary products (items to use together) within the lip domain.
       
-      When to use this tool:
-      - When the user asks for products that would complement a specific type of product
-      - When suggesting product combinations or complete routines
-      - When recommending items that work well together
+      When to call:
+      - User requests products that pair well with a specified product or product type
+      - Building product combinations or complete lip routines
+      - Recommending items that work well together
       
-      How to use:
-      1. Create a descriptive query about the type of complementary products to find
-      2. Specify the target category (lipstick, lip_balm_treatment, or lip_liner)
-      3. Set top_k to control the number of results (minimum 5)
-      
-      Example usage:
-      - 'Find hydrating lip balms that work well with matte lipsticks' with category 'lip_balm_treatment'
-      - 'Show me lip liners that complement brown-berry neutral lipstick shades' with category 'lip_liner'""",
+      Do NOT generate or transform the query here; downstream functions will handle query refinement. Provide only the inputs specified by the schema.""",
       "input_schema": {
         "type": "object",
         "properties": {
-          "query": {"type": "string", "description": "Description of complementary products to find"},
+          "product_name": {"type": "string", "description": "Complete product name for which to find complementary items"},
           "category": {"type": "string", "enum": ["lipstick", "lip_balm_treatment", "lip_liner"], "description": "Category to search within"},
-          "top_k": {"type": "integer", "minimum": 5, "description": "Number of complementary products to return"}
+          "top_k": {"type": "integer", "minimum": 5, "description": "Number of complementary products to return"},
+          "selected_sku": {"type": "string", "description": "Optional SKU resolved from a prior step (e.g., resolve_product)"},
+          "selected_products": {"type": "array", "description": "Optional prior resolved products array from resolve_product to improve complement selection"}
         },
-        "required": ["query", "category", "top_k"],
+        "required": ["product_name", "category", "top_k"],
         "additionalProperties": False
       }
     }
@@ -124,107 +110,57 @@ TOOL_FUNCS = {
 }
 
 def run_chat(user_message: str, history_path: Path = None) -> None:
-    # Load prompt template and generation settings
-    prompt_path = Path(__file__).parent / "prompt1.txt"
-    system_text = None
-    temperature = 0.4
-    max_tokens = 2000
-    # History path
-    history_path = history_path or (Path(__file__).parent / "conversation_history.jsonl")
-    if prompt_path.exists():
-        try:
-            system_text = prompt_path.read_text()
-        except Exception:
-            # Fall back to defaults on file read error
-            system_text = None
+    # Router-with-chaining: the LLM decides which tools to call and may chain multiple calls.
+    temperature = 0.2
+    max_tokens = 1024
+    messages = [{"role": "user", "content": user_message}]
 
-    # Augment system prompt with query reformulation assistant rules so the model answers directly
-    # or generates an optimized search query, instead of deflecting with prior-answer references.
-    additional_system_text = (
-        """
-        You are a query reformulation assistant for a product Q&A system.
-
-Your task: Check if the conversation history has enough information to answer the user's question. If yes, answer directly. If no, generate an optimized search query. Ask for clarification ONLY when the product being referred to is ambiguous.
-
-Strong directives:
-- Never respond with meta-commentary like "I already answered this" or "as I said before".
-- Do not use emojis.
-- Do not ask follow-up questions unless product identity is ambiguous (see Clarify rules). Never ask the user to pick categories or preferences before answering.
-- If the conversation history contains enough information to answer, ALWAYS restate the full, correct answer again for the user (prefix with "ANSWER: ") rather than referring back.
-
-Rules:
-1. First check: Does the conversation history contain enough information to answer this question?
-   - If YES: Return the answer directly based on the history (prefix with "ANSWER: ")
-   - If NO: Continue to step 2
-
-2. Ambiguity check (ONLY for product identity):
-   - If the user refers to "this lipstick", "this product", "it", "this", etc. WITHOUT naming a specific product:
-     * Check conversation history for [Retrieved: ...] markers with product context
-     * If NO clear product context exists in recent history: Return "CLARIFY: Could you please specify which lipstick you're asking about? (Include the brand and product name)"
-     * If product context exists but you're uncertain which product they mean: Return "CLARIFY: I see multiple products mentioned. Which one are you asking about - [list products]?"
-   - Do NOT ask clarification questions about preferences (finish, brand, ingredients, sensitivities) or skin tone. Proceed without them.
-
-3. For search query generation (default path when not answering directly):
-   - Always include BOTH the product identifier AND the key question terms when the question targets a specific product.
-     • Example: "What is the shade of MAC Ruby Woo?" → "MAC Ruby Woo shade" (NOT just "MAC Ruby Woo")
-     • Example: "Does it last long?" → "[Product Name] longevity lasting" (NOT just "[Product Name]")
-   - For general recommendations (e.g., "best lipstick for office"), do NOT ask to clarify preferences; generate a search query that reflects the request as-is.
-   - Look for [Retrieved: ...] markers in history — they may contain Product, Brand, and SKU from previous queries.
-   - If the question is a follow-up, include the product name AND the attribute (price, longevity, etc.).
-   - If the user mentions a NEW product name, use ONLY that new product (ignore previous context).
-   - Keep the query concise but include: product identifier + key question terms when relevant.
-   - Preserve numeric constraints and counts (e.g., "top 10", "10 options") present in the user's question.
-
-Formatting requirements:
-- Output must be PLAIN TEXT only.
-- Do NOT include XML/HTML/JSON/YAML tags, code fences, or quotes around the search query.
-- If providing a search query, return ONLY the query string."""
-
-    )
-
-    system_text = ((system_text or "").strip() + "\n\n" + additional_system_text).strip()
-
-    # Load prior history and add current user message
-    messages = load_conv_history(str(history_path), get_history_max_turns())
-    messages.append({"role": "user", "content": user_message})
-
-    # Loop to allow multi-step tool use (e.g., resolve -> query search -> finalize)
     total_start = time.perf_counter()
-    for _ in range(5):  # safety cap to avoid infinite loops
+    # Persist resolved context across steps so downstream tools can leverage it
+    resolved_context: Dict[str, Any] = {}
+    for step in range(6):  # safety cap
         llm_start = time.perf_counter()
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            system=system_text,
             temperature=temperature,
             max_tokens=max_tokens,
             messages=messages,
             tools=tools,
         )
         llm_elapsed = time.perf_counter() - llm_start
-        print(f"[TIMING] LLM call took {llm_elapsed:.3f}s")
+        print(f"[TIMING] LLM call took {llm_elapsed:.3f}s (step {step+1})")
 
         content_blocks = response.content
         tool_uses = [b for b in content_blocks if getattr(b, "type", None) == "tool_use"]
 
         if not tool_uses:
-            # No tool calls: final answer (print only text blocks)
+            # Final answer: print only text blocks and exit
             final_text = "\n\n".join([
                 getattr(b, "text", "") for b in content_blocks if getattr(b, "type", None) == "text"
             ])
             print(final_text or content_blocks)
-            # Append to history
-            append_conv_history(str(history_path), "user", user_message)
-            append_conv_history(str(history_path), "assistant", final_text)
             total_elapsed = time.perf_counter() - total_start
             print(f"[TIMING] Total run_chat execution took {total_elapsed:.3f}s")
             return
 
-        # Execute requested tools and append results
+        # Execute requested tools (all in this step) and append results
         tool_results_payload = []
         for block in tool_uses:
             name = getattr(block, "name", None)
             tool_use_id = getattr(block, "id", None)
             arguments: Dict[str, Any] = getattr(block, "input", {}) or {}
+            # Generalized context threading: inject any keys present in resolved_context
+            # that are also declared in the tool's input_schema properties (to respect
+            # additionalProperties=False), but only if they are not already provided.
+            try:
+                tool_schema = next((t for t in tools if t.get("name") == name), None)
+                schema_props = set(((tool_schema or {}).get("input_schema") or {}).get("properties", {}).keys())
+                for k, v in resolved_context.items():
+                    if k in schema_props and k not in arguments and v is not None:
+                        arguments[k] = v
+            except Exception:
+                # If schema lookup fails, skip injection safely
+                pass
             func = TOOL_FUNCS.get(name)
             if not func:
                 tool_results_payload.append({
@@ -245,19 +181,46 @@ Formatting requirements:
                 ])
                 tool_elapsed = time.perf_counter() - tool_start if 'tool_start' in locals() else 0.0
                 print(f"[TIMING] Tool '{name}' failed after {tool_elapsed:.3f}s; error={e}")
+
+            # Filter tool result to only include selected_products (and selected_sku) when available
+            content_to_send = result_str
+            handled_selected_payload = False
+            try:
+                parsed = json.loads(result_str)
+                if isinstance(parsed, dict) and "selected_products" in parsed:
+                    filtered_payload = {
+                        "selected_products": parsed.get("selected_products"),
+                        "selected_sku": parsed.get("selected_sku"),
+                    }
+                    content_to_send = json.dumps(filtered_payload)
+                    # Update resolved context for subsequent tools
+                    resolved_context.update({
+                        k: v for k, v in filtered_payload.items() if v is not None
+                    })
+                    handled_selected_payload = True
+            except Exception:
+                pass
+
+            # If this tool is a final-packaging style and we did not process a selected_products payload,
+            # treat its output as the final answer (handles plain-text responses too).
+            if name in ("retrieve_use_with_products", "retrieve_similar_products") and not handled_selected_payload:
+                print(content_to_send)
+                total_elapsed = time.perf_counter() - total_start
+                print(f"[TIMING] Total run_chat execution took {total_elapsed:.3f}s")
+                return
+
             tool_results_payload.append({
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
-                "content": result_str,
+                "content": content_to_send,
             })
 
-        # Provide the assistant's tool request and our tool results back in the conversation
+        # Feed the assistant tool requests and our tool results back into the conversation
         messages.extend([
             {"role": "assistant", "content": content_blocks},
             {"role": "user", "content": tool_results_payload},
         ])
 
-    # If we exit the loop without producing a final answer, log total time and exit
     total_elapsed = time.perf_counter() - total_start
     print(f"[TIMING] Total run_chat execution took {total_elapsed:.3f}s (max steps reached without final answer)")
     return
@@ -265,8 +228,8 @@ Formatting requirements:
 
 if __name__ == "__main__":
     # Example: user asks a natural question; model chooses the right tool
-    # run_chat("Which 5 lipsticks are similar to Typsy Beauty Cocoa Peptide Velvet Lipstick Brownie Bite Medium 02?")
-    run_chat("Which others products I can use it with Typsy Beauty Cocoa Peptide Velvet Lipstick Brownie Bite Medium 02 lipstick?")
+    run_chat("Which 5 lipsticks are similar to Typsy Beauty Cocoa Peptide Velvet Lipstick Brownie Bite Medium 02?")
+    # run_chat("Which others products I can use it with Typsy Beauty Cocoa Peptide Velvet Lipstick Brownie Bite Medium 02 lipstick?")
     # run_chat("How does this Typsy Beauty Cocoa Peptide Velvet Lipstick Brownie Bite Medium 02 looks on indian skin tone?")
     # run_chat(" What ingreadient use in Dr. PawPaw Lip & Eye Balm?")
     # run_chat(" Show me top 5 lip balm which is suitable on dry lips?")
