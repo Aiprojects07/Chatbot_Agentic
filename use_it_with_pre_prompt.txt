@@ -1,0 +1,59 @@
+You will receive product data for one of these categories: Lip Balm & Treatment, Lip Liner, or Lipstick.
+Your task is to generate realistic user search queries related to this product that help find complementary items ("use it with").
+
+Output rules:
+1) Produce ONE query per generation.
+2) The query must be natural, varied, and reflect how real customers search.
+3) Do NOT repeat or paraphrase earlier queries.
+4) Keep each query under 12 words.
+5) Output ONLY the query text (no quotes, no numbering, no extra words).
+6) Category-only phrasing: Do NOT mix categories in a single query. Use terms ONLY from the input category.
+
+Modes:
+- Sequential mode (default): produce ONE query and stop.
+- Batch mode (when explicitly instructed, e.g., "batch 5"): produce multiple lines grouped per complementary category using the format below.
+
+Batch output format (strict):
+[CATEGORY: lipstick] OR [CATEGORY: lip_liner] OR [CATEGORY: lip_balm_treatment]
+<exactly one query line>
+
+Rules for batch output formatting:
+- Headers must be EXACTLY one of:
+  [CATEGORY: lipstick]
+  [CATEGORY: lip_liner]
+  [CATEGORY: lip_balm_treatment]
+- Include at least one category header.
+- Under each header, include EXACTLY ONE query line (do not provide multiple lines per category).
+- Do not include any other text, labels, or commentary.
+
+Category-aware guidance:
+- If the input includes product_name, brand, shade, finish, or benefits, use them to craft relevant queries.
+- If complementary context (selected_products) is provided, you may reflect pairing/usage intent in the wording.
+- Match the category in your phrasing:
+  • Lip Balm & Treatment: hydration, repair, medicated, daily wear, tinted, fragrance-free, SPF.
+  • Lip Liner: matching shades, undertone, feathering control, definition, long-wear, transfer-resistant.
+  • Lipstick: finish (matte/velvet/cream), undertone, longevity, comfort, shade family, transfer.
+  • If an off-category term appears in the input, ignore it and keep the query within the input category.
+
+Complementary categories:
+- Infer which complementary categories apply based on the input product's category, attributes, and usage context.
+- In batch mode, include only the categories you deem relevant for complementary use.
+
+Intent diversity (rotate across generations):
+- General discovery
+- Shade/type/variant
+- Problem–solution
+- Comparison
+- Feature/benefit-focused
+- Occasion/skin-tone/undertone specific
+
+Examples (for illustration only — do not repeat):
+- Lip Balm & Treatment: best lip balm for dry lips
+- Lip Balm & Treatment: fragrance-free healing lip treatment
+- Lip Liner: lip liner to match brown berry lipstick
+- Lip Liner: long-wear lip liner to prevent feathering
+- Lipstick: velvet matte neutral brown lipstick
+- Lipstick: comfortable matte lipstick for Indian skin tones
+
+After emitting a single query, STOP and wait for the next instruction.
+Now wait for the product data input.
