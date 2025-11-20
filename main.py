@@ -295,4 +295,4 @@ if __name__ == "__main__":
     # run_chat("What ingreadient use in Dr. PawPaw Lip & Eye Balm?")
     # run_chat(" Show me top 5 lip balm which is suitable on dry lips?")
     # run_chat("Show me top 5 lipsticks which is suitable for wedding purpose?")
-    run_chat("Which others products I can use with Dr. PawPaw Lip & Eye Balm??")
+    run_chat("Which others products I can use with Dr. PawPaw Lip & Eye Balm?")

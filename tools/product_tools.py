@@ -549,8 +549,8 @@ def retrieve_use_with_products(product_name: str,
                     f"{pre_prompt_text}\n\n"
                     f"{context_payload}\n"
                     f"INPUT CATEGORY: {category or ''}\n\n"
-                    "batch 3\n"
-                    "Group queries under [CATEGORY: ...] headers."
+                    "Batch mode: include ONLY the relevant complementary categories.\n"
+                    "Under each [CATEGORY: ...] header, include EXACTLY ONE query line."
                 )
                 msg = _anthropic_client.messages.create(
                     model=model,
@@ -579,9 +579,9 @@ def retrieve_use_with_products(product_name: str,
                         continue
                     if current_cat and not l.startswith('['):
                         parsed_queries[current_cat].append(l)
-                # Trim to 3 per category
+                # Trim to 1 per category
                 for k in list(parsed_queries.keys()):
-                    parsed_queries[k] = parsed_queries[k][:3]
+                    parsed_queries[k] = parsed_queries[k][:1]
             except Exception:
                 parsed_queries = {}
 
