@@ -661,6 +661,8 @@ def retrieve_use_with_products(product_name: str,
                     "product_name": product_name,
                     "by_category": per_category_results,
                     "top_k": top_k,
+                    "selected_sku": selected_sku,
+                    "selected_products": (selected_products or []),
                 }
                 instruction = (
                     f"{rank_prompt_text}\n\n"
@@ -680,7 +682,6 @@ def retrieve_use_with_products(product_name: str,
                 # Strip code fences if present
                 if llm_out.startswith("```"):
                     llm_out = llm_out.strip().lstrip("`")
-                    # remove possible language tag
                     llm_out = "\n".join(llm_out.splitlines()[1:]) if "\n" in llm_out else llm_out
                     if llm_out.endswith("```"):
                         llm_out = llm_out[:-3].strip()
@@ -693,3 +694,124 @@ def retrieve_use_with_products(product_name: str,
         
     except Exception as e:
         return json.dumps({"error": f"Search failed: {str(e)}"})
+
+@beta_tool(
+    name="general_product_qna",
+    description=(
+        "Answers general product questions directly from Pinecone results without calling resolve_product. "
+        "Use for simple QnA like ingredients, finishes, brand details, or quick facts."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "User's natural-language question (e.g., 'What ingredient use in Dr. PawPaw Lip & Eye Balm?')"},
+            "category": {"type": "string", "enum": ["lipstick", "lip_balm_treatment", "lip_liner"], "description": "Optional category to filter search"},
+            "top_k": {"type": "integer", "minimum": 5, "description": "How many candidates to fetch from Pinecone before answering"}
+        },
+        "required": ["query"],
+        "additionalProperties": False
+    }
+)
+def general_product_qna(query: str,
+                        category: Optional[str] = None,
+                        top_k: int = 5) -> str:
+    """
+    General QnA over product corpus. Does NOT call resolve_product.
+    Flow: embed query -> Pinecone -> prompt1.txt to compose the answer -> return plain text.
+    """
+    try:
+        # Optional category filter aligned to Pinecone schema
+        category_mapping = {
+            'lip_balm_treatment': {
+                'category': 'Makeup',
+                'sub_category': 'Lip',
+                'leaf_level_category': 'Lip Balm & Treatment'
+            },
+            'lipstick': {
+                'category': 'Makeup',
+                'sub_category': 'Lip',
+                'leaf_level_category': 'Lipstick'
+            },
+            'lip_liner': {
+                'category': 'Makeup',
+                'sub_category': 'Lip',
+                'leaf_level_category': 'Lip Liner'
+            }
+        }
+
+        # Embed the raw user query (no resolve step)
+        vec = embed_text(query)
+        if not vec:
+            return "Sorry, I couldn't process your question right now. Please try again."
+
+        query_params = {
+            "vector": vec,
+            "top_k": top_k,
+            "include_values": False,
+            "include_metadata": True,
+            "namespace": _pc_namespace
+        }
+        if category and category.lower() in category_mapping:
+            cat_info = category_mapping[category.lower()]
+            query_params["filter"] = {
+                "$and": [
+                    {"category": {"$eq": cat_info['category']}},
+                    {"sub_category": {"$eq": cat_info['sub_category']}},
+                    {"leaf_level_category": {"$eq": cat_info['leaf_level_category']}}
+                ]
+            }
+
+        try:
+            results = index.query(**query_params)
+            matches = getattr(results, "matches", []) or results.get("matches", [])
+            retrieved = _matches_to_output(matches)
+        except Exception as e:
+            return f"Unable to retrieve data right now: {e}"
+
+        # Compose final answer using prompt1.txt
+        prompt_text = _load_prompt_text("prompt1.txt")
+        if _anthropic_client is not None and prompt_text:
+            try:
+                model = os.getenv("LLM_MODEL_QNA", os.getenv("LLM_MODEL_ROUTER", "claude-haiku-4-5-20251001"))
+                input_payload = {
+                    "query": query,
+                    "category": category,
+                    "retrieved_items": retrieved,
+                }
+                instruction = (
+                    f"{prompt_text}\n\n"
+                    "Use the inputs below to answer the user's question using only the retrieved items when possible.\n"
+                    "If asking about ingredients or product facts, extract from metadata fields.\n"
+                    "Inputs (JSON):\n"
+                    f"{json.dumps(input_payload, ensure_ascii=False)}\n\n"
+                    "Return only the final answer (no code fences)."
+                )
+                msg = _anthropic_client.messages.create(
+                    model=model,
+                    max_tokens=2000,
+                    temperature=0.2,
+                    messages=[{"role": "user", "content": instruction}],
+                )
+                text_blocks = [getattr(b, "text", "") for b in msg.content if getattr(b, "type", None) == "text"]
+                llm_out = ("\n".join(text_blocks)).strip()
+                if llm_out.startswith("```"):
+                    llm_out = llm_out.strip().lstrip("`")
+                    llm_out = "\n".join(llm_out.splitlines()[1:]) if "\n" in llm_out else llm_out
+                    if llm_out.endswith("```"):
+                        llm_out = llm_out[:-3].strip()
+                return llm_out
+            except Exception:
+                pass
+
+        # Fallback: minimal textual summary from top match
+        try:
+            top = retrieved[0] if retrieved else None
+            if top and isinstance(top, dict):
+                meta = top.get("metadata", {}) or {}
+                name = meta.get("product_name") or meta.get("title") or meta.get("name") or "the product"
+                return f"Here's what I found about {name}: {json.dumps(meta, ensure_ascii=False)[:800]}..."
+        except Exception:
+            pass
+        return "I couldn't find a confident answer right now. Please try rephrasing your question."
+    except Exception as e:
+        return f"Error: {e}"
