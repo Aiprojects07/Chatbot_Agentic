@@ -485,7 +485,7 @@ def retrieve_similar_products(
             },
             "top_k": {
                 "type": "integer", 
-                "minimum": 5, 
+                "minimum": 20, 
                 "description": "Number of complementary products to return"
             },
             "selected_sku": {
@@ -503,7 +503,7 @@ def retrieve_similar_products(
 )
 def retrieve_use_with_products(product_name: str,
                              category: str = None,
-                             top_k: int = 5,
+                             top_k: int = 20,
                              selected_sku: Optional[str] = None,
                              selected_products: Optional[List[Dict]] = None) -> str:
     try:
@@ -587,31 +587,9 @@ def retrieve_use_with_products(product_name: str,
 
         # Do not filter parsed categories by user-provided category. Run all LLM-decided categories.
 
-        # Fallback: if no categories/queries were parsed, attempt a single-category refinement as backup
+        # No fallback: if no categories/queries were parsed, proceed without generating synthetic categories/queries
         if not parsed_queries:
-            fallback_cat = (category.lower() if category and category.lower() in category_mapping else 'lip_balm_treatment')
-            parsed_queries = {fallback_cat: []}
-            if pre_prompt_text:
-                single_q_instruction = (
-                    f"{pre_prompt_text}\n\n"
-                    f"{context_payload}\n"
-                    f"INPUT CATEGORY: {fallback_cat}\n\n"
-                    "Generate ONE query. Output only the query text."
-                )
-                try:
-                    model = os.getenv("LLM_MODEL_USE_WITH", os.getenv("LLM_MODEL_ROUTER", "claude-haiku-4-5-20251001"))
-                    msg = _anthropic_client.messages.create(
-                        model=model,
-                        max_tokens=60,
-                        temperature=0.2,
-                        messages=[{"role": "user", "content": single_q_instruction}],
-                    )
-                    text_blocks = [getattr(b, "text", "") for b in msg.content if getattr(b, "type", None) == "text"]
-                    one_q = ("\n".join(text_blocks)).strip()
-                    if one_q:
-                        parsed_queries[fallback_cat] = [one_q]
-                except Exception:
-                    pass
+            parsed_queries = {}
 
         # Execute Pinecone search per parsed category and query, then aggregate raw results
         for cat_key, queries in parsed_queries.items():
