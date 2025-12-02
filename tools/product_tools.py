@@ -186,6 +186,16 @@ def resolve_product(name: str, top_k: int, category: str = None) -> str:
             'category': 'Makeup',
             'sub_category': 'Lip',
             'leaf_level_category': 'Lip Liner'
+        },
+        'lip_stain_tint': {
+            'category': 'Makeup',
+            'sub_category': 'Lip',
+            'leaf_level_category': 'Lip Stain & Tint'
+        },
+        'lip_gloss': {
+            'category': 'Makeup',
+            'sub_category': 'Lip',
+            'leaf_level_category': 'Lip Gloss'
         }
     }
     
@@ -374,6 +384,16 @@ def retrieve_similar_products(
             'category': 'Makeup',
             'sub_category': 'Lip',
             'leaf_level_category': 'Lip Liner'
+        },
+        'lip_stain_tint': {
+            'category': 'Makeup',
+            'sub_category': 'Lip',
+            'leaf_level_category': 'Lip Stain & Tint'
+        },
+        'lip_gloss': {
+            'category': 'Makeup',
+            'sub_category': 'Lip',
+            'leaf_level_category': 'Lip Gloss'
         }
     }
     
@@ -480,12 +500,12 @@ def retrieve_similar_products(
             },
             "category": {
                 "type": "string",
-                "enum": ["lipstick", "Lip Balm & Treatment", "Lip Liner"],
-                "description": "Category to search within (lipstick or Lip Balm & Treatment or Lip Liner)"
+                "enum": ["lipstick", "Lip Balm & Treatment", "Lip Liner", "Lip Stain & Tint", "Lip Gloss"],
+                "description": "Category to search within (lipstick, Lip Balm & Treatment, Lip Liner, Lip Stain & Tint, or Lip Gloss)"
             },
             "top_k": {
                 "type": "integer", 
-                "minimum": 20, 
+                "minimum": 3, 
                 "description": "Number of complementary products to return"
             },
             "selected_sku": {
@@ -503,7 +523,7 @@ def retrieve_similar_products(
 )
 def retrieve_use_with_products(product_name: str,
                              category: str = None,
-                             top_k: int = 20,
+                             top_k: int = 15,
                              selected_sku: Optional[str] = None,
                              selected_products: Optional[List[Dict]] = None) -> str:
     try:
@@ -530,10 +550,30 @@ def retrieve_use_with_products(product_name: str,
                 'sub_category': 'Lip',
                 'leaf_level_category': 'Lipstick'
             },
+            'liquid_lipstick': {
+                'category': 'Makeup',
+                'sub_category': 'Lip',
+                'leaf_level_category': 'Liquid Lipstick'
+            },
             'lip_liner': {
                 'category': 'Makeup',
                 'sub_category': 'Lip',
                 'leaf_level_category': 'Lip Liner'
+            },
+            'lip_stain_tint': {
+                'category': 'Makeup',
+                'sub_category': 'Lip',
+                'leaf_level_category': 'Lip Stain & Tint'
+            },
+            'lip_gloss': {
+                'category': 'Makeup',
+                'sub_category': 'Lip',
+                'leaf_level_category': 'Lip Gloss'
+            },
+            'lip_plumper': {
+                'category': 'Makeup',
+                'sub_category': 'Lip',
+                'leaf_level_category': 'Lip Plumper'
             }
         }
 
@@ -554,42 +594,115 @@ def retrieve_use_with_products(product_name: str,
                 )
                 msg = _anthropic_client.messages.create(
                     model=model,
-                    max_tokens=400,
+                    max_tokens=10000,
                     temperature=0.3,
                     messages=[{"role": "user", "content": pre_instruction}],
                 )
                 text_blocks = [getattr(b, "text", "") for b in msg.content if getattr(b, "type", None) == "text"]
                 raw = ("\n".join(text_blocks)).strip()
                 lines = [l.strip() for l in raw.splitlines() if l.strip()]
+
+                # Normalize various category header formats to internal keys
+                def _map_display_to_key(name: str) -> Optional[str]:
+                    n = (name or "").strip().lower()
+                    display_map = {
+                        'lip liner': 'lip_liner',
+                        'lip balm & treatment': 'lip_balm_treatment',
+                        'lipstick': 'lipstick',
+                        'liquid lipstick': 'liquid_lipstick',
+                        'lip stain & tint': 'lip_stain_tint',
+                        'lip gloss': 'lip_gloss',
+                        'lip plumper': 'lip_plumper',
+                    }
+                    return display_map.get(n)
+
                 current_cat = None
                 for l in lines:
-                    if l.lower().startswith("[category:"):
-                        # Strict header: one of lipstick, lip_liner, lip_balm_treatment
-                        header = l[10:-1].strip().lower()  # content between [CATEGORY: and ]
-                        if header == 'lip_liner':
-                            current_cat = 'lip_liner'
-                        elif header == 'lip_balm_treatment':
-                            current_cat = 'lip_balm_treatment'
-                        elif header == 'lipstick':
-                            current_cat = 'lipstick'
-                        else:
-                            current_cat = None
+                    low = l.lower()
+                    # Support legacy [CATEGORY: ...] headers
+                    if low.startswith("[category:") and low.endswith(']'):
+                        header = l[10:-1].strip()
+                        key = _map_display_to_key(header)
+                        # Also allow direct internal keys in legacy path
+                        if key is None and header in (
+                            'lip_liner','lip_balm_treatment','lipstick','liquid_lipstick','lip_stain_tint','lip_gloss','lip_plumper'):
+                            key = header
+                        current_cat = key
                         if current_cat and current_cat not in parsed_queries:
                             parsed_queries[current_cat] = []
                         continue
-                    if current_cat and not l.startswith('['):
-                        parsed_queries[current_cat].append(l)
-                # Trim to 1 per category
-                for k in list(parsed_queries.keys()):
-                    parsed_queries[k] = parsed_queries[k][:1]
+
+                    # Support markdown style: '## Category: NAME'
+                    if low.startswith('## category:'):
+                        name_part = l.split(':', 1)[1].strip() if ':' in l else ''
+                        key = _map_display_to_key(name_part)
+                        current_cat = key
+                        if current_cat and current_cat not in parsed_queries:
+                            parsed_queries[current_cat] = []
+                        continue
+
+                    # Support markdown style: '## NAME' where NAME is a display category
+                    if l.startswith('#'):
+                        # Strip leading hashes and whitespace
+                        heading_text = l.lstrip('#').strip()
+                        key = _map_display_to_key(heading_text)
+                        if key:
+                            current_cat = key
+                            if current_cat and current_cat not in parsed_queries:
+                                parsed_queries[current_cat] = []
+                            continue
+
+                    # Support bare display category lines like 'LIP GLOSS'
+                    bare_key = _map_display_to_key(l)
+                    if bare_key:
+                        current_cat = bare_key
+                        if current_cat and current_cat not in parsed_queries:
+                            parsed_queries[current_cat] = []
+                        continue
+
+                    # Fence between sections
+                    if l.startswith('---'):
+                        current_cat = None
+                        continue
+
+                    # Ignore bullets and code fences
+                    if l.startswith('*') or l.startswith('```'):
+                        continue
+
+                    # Collect query lines under the active category only
+                    if current_cat:
+                        # Skip accidental header-like lines for safety
+                        if not (l.startswith('[') or l.lower().startswith('category:')):
+                            parsed_queries[current_cat].append(l)
+
+                # Do not trim queries per category; include all queries generated by the LLM
             except Exception:
                 parsed_queries = {}
+
+        # Optional debug: show what was parsed from the LLM output
+        if os.getenv("USE_WITH_DEBUG"):
+            try:
+                print("[DEBUG] Parsed categories:", list(parsed_queries.keys()))
+                for _ck, _q in (parsed_queries or {}).items():
+                    print(f"[DEBUG] Category '{_ck}' queries: {len(_q)}")
+                    if _q:
+                        print(f"[DEBUG] First queries for '{_ck}':", _q[:3])
+            except Exception:
+                pass
 
         # Do not filter parsed categories by user-provided category. Run all LLM-decided categories.
 
         # No fallback: if no categories/queries were parsed, proceed without generating synthetic categories/queries
         if not parsed_queries:
             parsed_queries = {}
+
+        # Summary: total planned Pinecone queries (one per parsed query per category)
+        try:
+            _total_queries = sum(len(qs) for qs in (parsed_queries or {}).values())
+            _cat_count = len(parsed_queries or {})
+            print(f"[INFO] Pinecone queries to execute: {_total_queries} across {_cat_count} categories; each query top_k={top_k}")
+        except Exception:
+            pass
 
         # Execute Pinecone search per parsed category and query, then aggregate raw results
         for cat_key, queries in parsed_queries.items():
@@ -651,7 +764,7 @@ def retrieve_use_with_products(product_name: str,
                 )
                 msg = _anthropic_client.messages.create(
                     model=model,
-                    max_tokens=20000,
+                    max_tokens=10000,
                     temperature=0.0,
                     messages=[{"role": "user", "content": instruction}],
                 )
@@ -683,7 +796,7 @@ def retrieve_use_with_products(product_name: str,
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "User's natural-language question (e.g., 'What ingredient use in Dr. PawPaw Lip & Eye Balm?')"},
-            "category": {"type": "string", "enum": ["lipstick", "lip_balm_treatment", "lip_liner"], "description": "Optional category to filter search"},
+            "category": {"type": "string", "enum": ["lipstick", "lip_balm_treatment", "lip_liner", "lip_stain_tint", "lip_gloss"], "description": "Optional category to filter search"},
             "top_k": {"type": "integer", "minimum": 5, "description": "How many candidates to fetch from Pinecone before answering"}
         },
         "required": ["query"],
@@ -714,6 +827,16 @@ def general_product_qna(query: str,
                 'category': 'Makeup',
                 'sub_category': 'Lip',
                 'leaf_level_category': 'Lip Liner'
+            },
+            'lip_stain_tint': {
+                'category': 'Makeup',
+                'sub_category': 'Lip',
+                'leaf_level_category': 'Lip Stain & Tint'
+            },
+            'lip_gloss': {
+                'category': 'Makeup',
+                'sub_category': 'Lip',
+                'leaf_level_category': 'Lip Gloss'
             }
         }
 
@@ -747,7 +870,7 @@ def general_product_qna(query: str,
             return f"Unable to retrieve data right now: {e}"
 
         # Compose final answer using prompt1.txt
-        prompt_text = _load_prompt_text("prompt1.txt")
+        prompt_text = _load_prompt_text("/Users/ptah/Documents/Skills_Chatbot/Chatbot system message prompt.txt")
         if _anthropic_client is not None and prompt_text:
             try:
                 model = os.getenv("LLM_MODEL_QNA", os.getenv("LLM_MODEL_ROUTER", "claude-haiku-4-5-20251001"))
@@ -766,7 +889,7 @@ def general_product_qna(query: str,
                 )
                 msg = _anthropic_client.messages.create(
                     model=model,
-                    max_tokens=2000,
+                    max_tokens=20000,
                     temperature=0.2,
                     messages=[{"role": "user", "content": instruction}],
                 )

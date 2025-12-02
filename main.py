@@ -43,8 +43,8 @@ tools = [
                 },
                 "category": {
                     "type": "string",
-                    "enum": ["lipstick", "lip_balm_treatment", "lip_liner"],
-                    "description": "Optional category to filter by (lipstick, lip_balm_treatment, or lip_liner)"
+                    "enum": ["lipstick", "lip_balm_treatment", "lip_liner", "lip_stain_tint", "lip_gloss", "liquid_lipstick", "lip_plumper"],
+                    "description": "Optional category to filter by (lipstick, lip_balm_treatment, lip_liner, lip_stain_tint, or lip_gloss)"
                 },
                 "top_k": {
                     "type": "integer",
@@ -69,7 +69,7 @@ tools = [
           "type": "object",
           "properties": {
             "product_name": {"type": "string", "description": "Complete product name to anchor similarity (e.g., brand + line + shade)"},
-            "category": {"type": "string", "enum": ["lipstick", "lip_balm_treatment", "lip_liner"], "description": "Optional category to filter by (lipstick, lip_balm_treatment, or lip_liner)"},
+            "category": {"type": "string", "enum": ["lipstick", "lip_balm_treatment", "lip_liner", "lip_stain_tint", "lip_gloss", "liquid_lipstick", "lip_plumper"], "description": "Optional category to filter by (lipstick, lip_balm_treatment, lip_liner, lip_stain_tint, lip_gloss, liquid_lipstick, or lip_plumper)"},
             "top_k": {"type": "integer", "minimum": 10, "description": "Number of similar products to return"},
             "selected_sku": {"type": "string", "description": "Optional SKU resolved from a prior step (e.g., resolve_product)"},
             "selected_products": {"type": "array", "description": "Optional prior resolved products array from resolve_product to improve similarity selection"}
@@ -93,6 +93,11 @@ tools = [
       - Set the 'category' only if the user explicitly specifies it OR you are highly confident from context.
       - Otherwise omit it; the tool will infer complementary categories downstream.
 
+      Top-K guidance:
+      - Default to top_k = 3 when unspecified.
+      - If the user explicitly requests a count, use that number.
+      - Otherwise, choose a small value appropriate for quick ranking (generally 3–6). No hard cap is enforced here.
+
       Prerequisite when a SPECIFIC product name is mentioned:
       - FIRST call resolve_product to get the exact SKU and prior resolved products.
       - THEN call retrieve_use_with_products, passing selected_sku and selected_products from resolve_product.
@@ -104,12 +109,12 @@ tools = [
         "type": "object",
         "properties": {
           "product_name": {"type": "string", "description": "Complete product name for which to find complementary items"},
-          "category": {"type": "string", "enum": ["lipstick", "lip_balm_treatment", "lip_liner"], "description": "Category to search within"},
-          "top_k": {"type": "integer", "minimum": 5, "description": "Number of complementary products to return"},
+          "category": {"type": "string", "enum": ["lipstick", "Lip Balm & Treatment", "Lip Liner", "Lip Stain & Tint", "Lip Gloss", "Liquid Lipstick", "Lip Plumper"], "description": "Category to search within"},
+          "top_k": {"type": "integer", "minimum": 3, "default": 8, "description": "Number of complementary products to return (defaults to 3 unless the user asks for more)"},
           "selected_sku": {"type": "string", "description": "Optional SKU resolved from a prior step (e.g., resolve_product)"},
           "selected_products": {"type": "array", "description": "Optional prior resolved products array from resolve_product to improve complement selection"}
         },
-        "required": ["product_name", "category", "top_k"],
+        "required": ["product_name", "category"],
         "additionalProperties": False
       }
     }
@@ -133,8 +138,8 @@ tools = [
         "type": "object",
         "properties": {
           "query": {"type": "string", "description": "User's natural-language question"},
-          "category": {"type": "string", "enum": ["lipstick", "lip_balm_treatment", "lip_liner"], "description": "Category to search within"},
-          "top_k": {"type": "integer", "minimum": 5, "description": "How many candidates to fetch before answering"}
+          "category": {"type": "string", "enum": ["lipstick", "lip_balm_treatment", "lip_liner", "lip_stain_tint", "lip_gloss", "liquid_lipstick", "lip_plumper"], "description": "Category to search within"},
+          "top_k": {"type": "integer", "minimum": 10, "description": "How many candidates to fetch before answering"}
         },
         "required": ["query"],
         "additionalProperties": False
@@ -148,6 +153,71 @@ TOOL_FUNCS = {
     "resolve_product": resolve_product,
     "general_product_qna": general_product_qna,
 }
+
+def _extract_primary_product_id(resolved_context: Dict[str, Any]) -> str:
+    """Derive a stable identifier for filename. Prefer SKU; fallback to product_id.
+
+    Order of precedence:
+    1) resolved_context['selected_sku'] if present
+    2) Any SKU-like key in the first item of resolved_context['selected_products'][0]['metadata']
+    3) selected_products[0]['product_id']
+    """
+    try:
+        # 1) Directly use selected_sku if present
+        sel_sku = resolved_context.get("selected_sku")
+        if isinstance(sel_sku, str) and sel_sku.strip():
+            return sel_sku.strip()
+
+        sel = resolved_context.get("selected_products") or []
+        if isinstance(sel, list) and sel:
+            first = sel[0] if isinstance(sel[0], dict) else None
+            if first:
+                # 2) Try to pull SKU-like fields from metadata
+                meta = first.get("metadata") or {}
+                if isinstance(meta, dict):
+                    sku_keys = [
+                        "sku", "SKU", "product_sku", "sku_id", "Sku", "SkuId",
+                        "productSku", "Product SKU", "product_sku_id"
+                    ]
+                    for k in sku_keys:
+                        v = meta.get(k)
+                        if isinstance(v, (str, int)):
+                            vs = str(v).strip()
+                            if vs:
+                                return vs
+                # 3) Fallback to product_id
+                pid = first.get("product_id")
+                if isinstance(pid, str) and pid.strip():
+                    return pid.strip()
+    except Exception:
+        pass
+    return ""
+
+def _save_final_output(content_str: str, resolved_context: Dict[str, Any]) -> None:
+    """Save final tool output to outputs/{product_id}.json if product_id available.
+
+    If JSON parse fails or product_id missing, skip silently.
+    """
+    try:
+        product_id = _extract_primary_product_id(resolved_context)
+        if not product_id:
+            return
+        # Parse JSON if possible for nice formatting; else save raw text
+        try:
+            parsed = json.loads(content_str)
+        except Exception:
+            parsed = None
+        out_dir = Path(__file__).parent / "outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{product_id}.json"
+        with open(out_path, "w", encoding="utf-8") as f:
+            if parsed is not None:
+                json.dump(parsed, f, ensure_ascii=False, indent=2)
+            else:
+                f.write(content_str)
+        print(f"[SAVE] Wrote final output to {out_path}")
+    except Exception as e:
+        print(f"[SAVE] Failed to write final output: {e}")
 
 def run_chat(user_message: str, history_path: Path = None) -> None:
     # Router-with-chaining: the LLM decides which tools to call and may chain multiple calls.
@@ -221,7 +291,7 @@ def run_chat(user_message: str, history_path: Path = None) -> None:
                 tool_start = time.perf_counter()
                 result_str = func(**arguments)
                 tool_elapsed = time.perf_counter() - tool_start
-                print(f"[TIMING] Tool '{name}' executed in {tool_elapsed:.3f}s with args={arguments}")
+                print(f"[TIMING] Tool '{name}' executed in {tool_elapsed:.3f}s")
             except Exception as e:
                 result_str = os.linesep.join([
                     "{\"error\": \"tool execution failed\"}",
@@ -231,27 +301,33 @@ def run_chat(user_message: str, history_path: Path = None) -> None:
                 print(f"[TIMING] Tool '{name}' failed after {tool_elapsed:.3f}s; error={e}")
 
             # Filter tool result to only include selected_products (and selected_sku) when available
+            # This threading applies ONLY to resolve_product outputs.
             content_to_send = result_str
             handled_selected_payload = False
-            try:
-                parsed = json.loads(result_str)
-                if isinstance(parsed, dict) and "selected_products" in parsed:
-                    filtered_payload = {
-                        "selected_products": parsed.get("selected_products"),
-                        "selected_sku": parsed.get("selected_sku"),
-                    }
-                    content_to_send = json.dumps(filtered_payload)
-                    # Update resolved context for subsequent tools
-                    resolved_context.update({
-                        k: v for k, v in filtered_payload.items() if v is not None
-                    })
-                    handled_selected_payload = True
-            except Exception:
-                pass
+            if name == "resolve_product":
+                try:
+                    parsed = json.loads(result_str)
+                    if isinstance(parsed, dict) and "selected_products" in parsed:
+                        filtered_payload = {
+                            "selected_products": parsed.get("selected_products"),
+                            "selected_sku": parsed.get("selected_sku"),
+                        }
+                        content_to_send = json.dumps(filtered_payload)
+                        # Update resolved context for subsequent tools
+                        resolved_context.update({
+                            k: v for k, v in filtered_payload.items() if v is not None
+                        })
+                        handled_selected_payload = True
+                except Exception as e:
+                    # Keep silent in production; uncomment for debugging:
+                    # print(f"[DEBUG] JSON parse failed for resolve_product output: {e}")
+                    pass
 
             # If this tool is a final-packaging style and we did not process a selected_products payload,
             # treat its output as the final answer (handles plain-text responses too).
             if name in ("retrieve_use_with_products", "retrieve_similar_products", "general_product_qna") and not handled_selected_payload:
+                # Save output to outputs/{product_id}.json when we have a resolved product
+                _save_final_output(content_to_send, resolved_context)
                 print(content_to_send)
                 total_elapsed = time.perf_counter() - total_start
                 print(f"[TIMING] Total run_chat execution took {total_elapsed:.3f}s")
@@ -288,11 +364,24 @@ def run_chat(user_message: str, history_path: Path = None) -> None:
 
 
 if __name__ == "__main__":
-    # Example: user asks a natural question; model chooses the right tool
-    # run_chat("Which 5 lipsticks are similar to Typsy Beauty Cocoa Peptide Velvet Lipstick Brownie Bite Medium 02?")
+    # # Example: user asks a natural question; model chooses the right tool
+    # # run_chat("Which 5 lipsticks are similar to Typsy Beauty Cocoa Peptide Velvet Lipstick Brownie Bite Medium 02?")
     # run_chat("Which others products I can use it with Typsy Beauty Cocoa Peptide Velvet Lipstick Brownie Bite Medium 02 lipstick?")
-    # run_chat("How does this Typsy Beauty Cocoa Peptide Velvet Lipstick Brownie Bite Medium 02 looks on indian skin tone?")
-    # run_chat("What ingreadient use in Dr. PawPaw Lip & Eye Balm?")
-    # run_chat(" Show me top 5 lip balm which is suitable on dry lips?")
-    # run_chat("Show me top 5 lipsticks which is suitable for wedding purpose?")
-    run_chat("Which others products I can use with Dr. PawPaw Lip & Eye Balm?")
+    # # run_chat("How does this Typsy Beauty Cocoa Peptide Velvet Lipstick Brownie Bite Medium 02 looks on indian skin tone?")
+    # # run_chat("What ingreadient use in Dr. PawPaw Lip & Eye Balm?")
+    # # run_chat(" Show me top 5 lip balm which is suitable on dry lips?")
+    # # run_chat("Show me top 5 lipsticks which is suitable for wedding purpose?")
+    # # run_chat("Which others products I can use with Dr. PawPaw Lip & Eye Balm?")
+    print("QnA Tools Chatbot — type 'exit' or 'quit' to leave.")
+    while True:
+        try:
+            user_in = input("You: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nExiting.")
+            break
+        if not user_in:
+            continue
+        if user_in.lower() in ("exit", "quit", "q"):
+            print("Goodbye!")
+            break
+        run_chat(user_in)
